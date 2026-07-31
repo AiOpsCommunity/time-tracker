@@ -1,0 +1,13 @@
+# python
+.venv/
+__pycache__/
+
+# editor / assistant
+.vscode
+.claude
+
+# local backend data
+data/
+
+# misc
+.DS_Store

@@ -1,0 +1,795 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Time tracking</title>
+  <style>
+    :root { color-scheme: light dark; --border: #8883; --muted: #6b7280; --accent: #ea580c; }
+    body { margin: 0; font-family: system-ui, sans-serif; }
+    #root { max-width: 980px; margin: 0 auto; padding: 32px 24px 64px; }
+    h1 { font-size: 22px; margin: 0 0 20px; }
+
+    form {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      margin-bottom: 28px; padding: 14px 16px; border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    select, input[type="text"], input {
+      font: inherit; padding: 7px 10px; border: 1px solid var(--border);
+      border-radius: 6px; background: transparent; color: inherit;
+    }
+    input[placeholder] { flex: 1; min-width: 120px; }
+    button {
+      font: inherit; padding: 8px 16px; border: none; border-radius: 6px;
+      background: var(--accent); color: #fff; cursor: pointer;
+    }
+    button:hover { filter: brightness(1.08); }
+    .timer {
+      font-variant-numeric: tabular-nums; font-weight: 600; min-width: 64px;
+    }
+
+    .icon-button {
+      background: transparent; color: inherit; padding: 7px 9px;
+      border: 1px solid var(--border); line-height: 1; font-size: 15px;
+    }
+
+    .action-stack {
+      display: flex; flex-direction: column; align-items: flex-start; gap: 10px;
+      margin-bottom: 14px;
+    }
+    .clients-modal { width: 420px; max-height: 80vh; overflow-y: auto; }
+    .client-block { padding: 10px 0; border-bottom: 1px solid var(--border); }
+    .client-block:first-of-type { padding-top: 0; }
+    .client-row { display: flex; align-items: center; gap: 6px; padding: 4px 0; }
+    .client-row input { flex: 1; }
+    .project-row { display: flex; align-items: center; gap: 6px; padding: 4px 0 4px 20px; }
+    .project-row input { flex: 1; }
+    .icon-button.small {
+      padding: 4px 8px; font-size: 13px; border-color: transparent; opacity: 0.75;
+    }
+    .icon-button.small:hover { opacity: 1; border-color: var(--border); background: color-mix(in srgb, currentColor 8%, transparent); }
+    .add-row { display: flex; gap: 8px; margin-top: 8px; }
+    .add-row input { flex: 1; }
+    .add-row.project-row { padding-left: 20px; margin-top: 6px; }
+
+    .filter-bar {
+      display: flex; align-items: center; gap: 8px; margin-bottom: 14px;
+    }
+    .filter-bar select { min-width: 160px; }
+    .filter-bar .spacer { flex: 1; }
+    .filter-bar .danger { background: #dc2626; }
+
+    th.checkbox-col, td.checkbox-col { width: 32px; padding-right: 0; }
+
+    table { border-collapse: collapse; width: 100%; }
+    th {
+      text-align: left; padding: 8px 10px; font-size: 12px; text-transform: uppercase;
+      letter-spacing: 0.04em; color: var(--muted); border-bottom: 1px solid var(--border);
+    }
+    td { padding: 8px 10px; border-bottom: 1px solid var(--border); }
+    tr:hover td { background: color-mix(in srgb, currentColor 4%, transparent); }
+    tr.weekend td { color: var(--muted); }
+    tr.empty td { color: var(--muted); font-style: italic; opacity: 0.6; }
+    .weekday { display: inline-block; min-width: 28px; font-size: 12px; font-weight: 600; color: var(--muted); }
+    tr.week-header td {
+      padding-top: 20px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em;
+      color: var(--muted); border-bottom: 1px solid var(--border);
+    }
+    tr.week-header:first-child td { padding-top: 8px; }
+    tbody tr:not(.week-header) { cursor: pointer; }
+
+    .overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+      display: flex; align-items: center; justify-content: center; z-index: 10;
+    }
+    .modal {
+      background: Canvas; color: CanvasText; border: 1px solid var(--border);
+      border-radius: 10px; padding: 20px; width: 320px;
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .modal h2 { font-size: 16px; margin: 0; }
+    .modal select, .modal input { width: 100%; box-sizing: border-box; }
+    .modal .times { display: flex; align-items: center; gap: 8px; }
+    .modal .times input { text-align: center; }
+    .modal .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+    button.secondary { background: transparent; color: inherit; border: 1px solid var(--border); }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module">
+    import React from 'https://esm.sh/react@19'
+    import { createRoot } from 'https://esm.sh/react-dom@19/client'
+    import htm from 'https://esm.sh/htm@3'
+
+    const html = htm.bind(React.createElement)
+    const { useEffect, useRef, useState } = React
+
+    const POLL_INTERVAL_MS = 3000
+
+    async function apiFetch(path, options) {
+      const res = await fetch(`/api${path}`, {
+        headers: options?.body ? { 'Content-Type': 'application/json' } : undefined,
+        ...options,
+      })
+      if (!res.ok) throw new Error(`${options?.method || 'GET'} /api${path} failed: ${res.status}`)
+      if (res.status === 204) return null
+      return res.json()
+    }
+
+    const TASKS = [
+      'Development', 'Code review', 'Meeting', '1-on-1', 'Planning',
+      'Documentation', 'Research', 'Support', 'Admin', 'Break',
+    ]
+
+    function hhmm(d) {
+      return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+    }
+
+    // Local calendar date (e.g. Europe/Amsterdam), not UTC — toISOString() would shift near midnight.
+    function localDateStr(d) {
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+    }
+
+    // Loosely parses "9", "900", "9:00", "9.30" etc into "HH:MM", or null if not parseable yet.
+    function parseLooseTime(raw) {
+      const cleaned = raw.trim().replace(/[.,]/, ':')
+      let h, m
+      if (cleaned.includes(':')) {
+        const [hh, mm] = cleaned.split(':')
+        h = Number(hh)
+        m = Number(mm || 0)
+      } else if (/^\d{3,4}$/.test(cleaned)) {
+        h = Number(cleaned.slice(0, cleaned.length - 2))
+        m = Number(cleaned.slice(-2))
+      } else if (/^\d{1,2}$/.test(cleaned)) {
+        h = Number(cleaned)
+        m = 0
+      } else {
+        return null
+      }
+      if (Number.isNaN(h) || Number.isNaN(m) || h > 23 || m > 59) return null
+      return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
+    }
+
+    const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+
+    function isoWeekKey(dateStr) {
+      const d = new Date(dateStr + 'T00:00:00')
+      const day = (d.getDay() + 6) % 7 // Mon=0..Sun=6
+      d.setDate(d.getDate() - day + 3) // nearest Thursday
+      const firstThursday = new Date(d.getFullYear(), 0, 4)
+      const week = 1 + Math.round(((d - firstThursday) / 86400000 - 3 + ((firstThursday.getDay() + 6) % 7)) / 7)
+      return `${d.getFullYear()}-W${String(week).padStart(2, '0')}`
+    }
+
+    function dateAddDays(dateStr, n) {
+      const d = new Date(dateStr + 'T00:00:00Z')
+      d.setUTCDate(d.getUTCDate() + n)
+      return d.toISOString().slice(0, 10)
+    }
+
+    // Entries grouped by date, oldest first, with grey placeholder rows for missing days.
+    function buildRows(entries) {
+      if (entries.length === 0) return []
+      const byDate = {}
+      for (const e of entries) (byDate[e.date] ||= []).push(e)
+
+      const dates = Object.keys(byDate).sort()
+      const today = localDateStr(new Date())
+      const last = dates[dates.length - 1] > today ? dates[dates.length - 1] : today
+
+      const rows = []
+      for (let d = dates[0]; d <= last; d = dateAddDays(d, 1)) {
+        const dayEntries = byDate[d]
+        rows.push(dayEntries ? dayEntries : [{ date: d, empty: true }])
+      }
+      return rows.flat()
+    }
+
+    // Last-used client/project/name are remembered locally so the fields default
+    // sensibly next time without needing a backend round-trip just for that.
+    const DEFAULTS_KEY = 'timeTrackingDefaults'
+    function loadDefaults() {
+      try {
+        return { client: '', project: '', firstName: '', lastName: '', ...JSON.parse(localStorage.getItem(DEFAULTS_KEY)) }
+      } catch {
+        return { client: '', project: '', firstName: '', lastName: '' }
+      }
+    }
+    function saveDefaults(defaults) {
+      localStorage.setItem(DEFAULTS_KEY, JSON.stringify(defaults))
+    }
+
+    async function fetchEntries() {
+      const { timeEntries } = await apiFetch('/entries')
+      return timeEntries
+    }
+
+    async function fetchClients() {
+      const { clients } = await apiFetch('/clients')
+      return clients.sort((a, b) => a.name.localeCompare(b.name))
+    }
+
+    async function fetchActiveTimer() {
+      const { activeTimer } = await apiFetch('/timer')
+      return activeTimer
+    }
+
+    async function saveEntry({ id, date, task, notes, start, end, hours, client, project, firstName, lastName }) {
+      const data = {
+        date, task, notes,
+        hours: Number(hours.toFixed(2)),
+        hoursRounded: Number(hours.toFixed(2)),
+        startedAt: start,
+        endedAt: end,
+        client, project, firstName, lastName,
+        source: 'app',
+      }
+      if (id) {
+        await apiFetch(`/entries/${id}`, { method: 'PUT', body: JSON.stringify(data) })
+      } else {
+        await apiFetch('/entries', { method: 'POST', body: JSON.stringify(data) })
+      }
+    }
+
+    async function deleteEntry(id) {
+      await apiFetch(`/entries/${id}`, { method: 'DELETE' })
+    }
+
+    async function bulkDeleteEntries(ids) {
+      await apiFetch('/entries/bulk-delete', { method: 'POST', body: JSON.stringify({ ids: [...ids] }) })
+    }
+
+    async function setActiveTimer(data) {
+      await apiFetch('/timer', { method: 'PUT', body: JSON.stringify(data) })
+    }
+
+    async function clearActiveTimer() {
+      await apiFetch('/timer', { method: 'DELETE' })
+    }
+
+    async function addClient(name) {
+      await apiFetch('/clients', { method: 'POST', body: JSON.stringify({ name, projects: [] }) })
+    }
+
+    async function renameClient(clientId, name) {
+      await apiFetch(`/clients/${clientId}`, { method: 'PUT', body: JSON.stringify({ name }) })
+    }
+
+    async function addProject(clientDoc, project) {
+      await apiFetch(`/clients/${clientDoc.id}`, { method: 'PUT', body: JSON.stringify({ projects: [...clientDoc.projects, project] }) })
+    }
+
+    async function renameProject(clientDoc, oldProject, newProject) {
+      const projects = clientDoc.projects.map((p) => (p === oldProject ? newProject : p))
+      await apiFetch(`/clients/${clientDoc.id}`, { method: 'PUT', body: JSON.stringify({ projects }) })
+    }
+
+    // Cascade delete (client's entries + the client itself) is handled server-side.
+    async function deleteClient(clientDoc) {
+      await apiFetch(`/clients/${clientDoc.id}`, { method: 'DELETE' })
+    }
+
+    // Cascade delete (matching entries + removing the project from the client) is handled server-side.
+    async function deleteProject(clientDoc, project) {
+      await apiFetch(`/clients/${clientDoc.id}?project=${encodeURIComponent(project)}`, { method: 'DELETE' })
+    }
+
+    function App() {
+      const [entries, setEntries] = useState([])
+      const [error, setError] = useState('')
+      const [task, setTask] = useState(TASKS[0])
+      const [notes, setNotes] = useState('')
+      const [startedAt, setStartedAt] = useState(null)
+      const [elapsed, setElapsed] = useState(0)
+      const [startTimeOverride, setStartTimeOverride] = useState('')
+
+      const [defaults, setDefaults] = useState(loadDefaults)
+      const { client, project, firstName, lastName } = defaults
+      function updateDefaults(next) {
+        setDefaults(next)
+        saveDefaults(next)
+      }
+
+      const [clients, setClients] = useState([])
+      const [manageClientsOpen, setManageClientsOpen] = useState(false)
+
+      function reloadClients() {
+        fetchClients().then(setClients).catch((err) => setError(`Failed to load clients: ${err.message}`))
+      }
+
+      useEffect(() => {
+        reloadClients()
+        const id = setInterval(reloadClients, POLL_INTERVAL_MS)
+        return () => clearInterval(id)
+      }, [])
+
+      const [newClientName, setNewClientName] = useState('')
+      const [newProjectByClient, setNewProjectByClient] = useState({}) // { [clientId]: string }
+      const [renaming, setRenaming] = useState(null) // { clientId, project? } | null
+      const [renameValue, setRenameValue] = useState('')
+      const [confirmDeleteTarget, setConfirmDeleteTarget] = useState(null) // { clientDoc, project? } | null
+      const [deleteEntryCount, setDeleteEntryCount] = useState(null)
+
+      async function handleAddClient(e) {
+        e.preventDefault()
+        if (!newClientName.trim()) return
+        await addClient(newClientName.trim())
+        setNewClientName('')
+        reloadClients()
+      }
+
+      async function handleAddProject(e, clientDoc) {
+        e.preventDefault()
+        const value = (newProjectByClient[clientDoc.id] || '').trim()
+        if (!value || clientDoc.projects.includes(value)) return
+        await addProject(clientDoc, value)
+        setNewProjectByClient((prev) => ({ ...prev, [clientDoc.id]: '' }))
+        reloadClients()
+      }
+
+      function startRename(clientId, project) {
+        setRenaming({ clientId, project })
+        setRenameValue(project ?? clients.find((c) => c.id === clientId)?.name ?? '')
+      }
+
+      async function commitRename() {
+        if (!renaming || !renameValue.trim()) { setRenaming(null); return }
+        const clientDoc = clients.find((c) => c.id === renaming.clientId)
+        if (renaming.project == null) {
+          await renameClient(renaming.clientId, renameValue.trim())
+        } else {
+          await renameProject(clientDoc, renaming.project, renameValue.trim())
+        }
+        setRenaming(null)
+        reloadClients()
+      }
+
+      async function requestDelete(clientDoc, project) {
+        const count = entries.filter((e) => e.client === clientDoc.name && (!project || e.project === project)).length
+        setDeleteEntryCount(count)
+        setConfirmDeleteTarget({ clientDoc, project })
+      }
+
+      async function confirmDeleteNow() {
+        const { clientDoc, project } = confirmDeleteTarget
+        if (project) {
+          await deleteProject(clientDoc, project)
+        } else {
+          await deleteClient(clientDoc)
+        }
+        setConfirmDeleteTarget(null)
+        setDeleteEntryCount(null)
+        reloadClients()
+        reloadEntries()
+      }
+
+      const [filter, setFilter] = useState('all') // 'all' | 'client::<client>' | 'project::<client>|<project>'
+
+      const [selectedIds, setSelectedIds] = useState(() => new Set())
+      const [confirmBulkDelete, setConfirmBulkDelete] = useState(false)
+      const lastCheckedIdRef = useRef(null)
+      // orderedIds is the currently visible, top-to-bottom list of selectable row ids —
+      // shift-click walks this list to find the range to toggle.
+      function toggleSelected(id, event, orderedIds) {
+        const shouldSelect = !selectedIds.has(id)
+        if (event?.shiftKey && lastCheckedIdRef.current) {
+          const from = orderedIds.indexOf(lastCheckedIdRef.current)
+          const to = orderedIds.indexOf(id)
+          if (from !== -1 && to !== -1) {
+            const [lo, hi] = from < to ? [from, to] : [to, from]
+            setSelectedIds((prev) => {
+              const next = new Set(prev)
+              for (const rangeId of orderedIds.slice(lo, hi + 1)) {
+                shouldSelect ? next.add(rangeId) : next.delete(rangeId)
+              }
+              return next
+            })
+            lastCheckedIdRef.current = id
+            return
+          }
+        }
+        setSelectedIds((prev) => {
+          const next = new Set(prev)
+          next.has(id) ? next.delete(id) : next.add(id)
+          return next
+        })
+        lastCheckedIdRef.current = id
+      }
+      async function handleBulkDelete() {
+        await bulkDeleteEntries(selectedIds)
+        setSelectedIds(new Set())
+        setConfirmBulkDelete(false)
+        reloadEntries()
+      }
+
+      const [confirmDelete, setConfirmDelete] = useState(false)
+
+      const [pastModal, setPastModal] = useState(null) // { date, id? } | null
+      const [pastTask, setPastTask] = useState(TASKS[0])
+      const [pastNotes, setPastNotes] = useState('')
+      const [pastStart, setPastStart] = useState('')
+      const [pastEnd, setPastEnd] = useState('')
+      const [pastClient, setPastClient] = useState('')
+      const [pastProject, setPastProject] = useState('')
+      const [pastFirstName, setPastFirstName] = useState('')
+      const [pastLastName, setPastLastName] = useState('')
+
+      function openPastModal(date) {
+        setPastModal({ date })
+        setPastTask(TASKS[0])
+        setPastNotes('')
+        setPastStart('')
+        setPastEnd('')
+        setPastClient(client)
+        setPastProject(project)
+        setPastFirstName(firstName)
+        setPastLastName(lastName)
+        setConfirmDelete(false)
+      }
+
+      function openEditModal(entry) {
+        setPastModal({ date: entry.date, id: entry.id })
+        setPastTask(entry.task)
+        setPastNotes(entry.notes)
+        setPastStart(entry.startedAt)
+        setPastEnd(entry.endedAt)
+        setPastClient(entry.client)
+        setPastProject(entry.project)
+        setPastFirstName(entry.firstName)
+        setPastLastName(entry.lastName)
+        setConfirmDelete(false)
+      }
+
+      async function handleDeleteEntry() {
+        await deleteEntry(pastModal.id)
+        setPastModal(null)
+        setConfirmDelete(false)
+        reloadEntries()
+      }
+
+      function reloadEntries() {
+        fetchEntries()
+          .then((list) => setEntries(list.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0))))
+          .catch((err) => setError(`Failed to load entries: ${err.message}`))
+      }
+
+      useEffect(() => {
+        reloadEntries()
+        const id = setInterval(reloadEntries, POLL_INTERVAL_MS)
+        return () => clearInterval(id)
+      }, [])
+
+      useEffect(() => {
+        fetchActiveTimer().then((data) => {
+          if (!data) return
+          setTask(data.task)
+          setNotes(data.notes)
+          setStartedAt(new Date(data.startedAt))
+        }).catch((err) => setError(`Failed to load active timer: ${err.message}`))
+      }, [])
+
+      useEffect(() => {
+        if (!startedAt) return
+        setElapsed(Date.now() - startedAt.getTime())
+        const id = setInterval(() => setElapsed(Date.now() - startedAt.getTime()), 1000)
+        return () => clearInterval(id)
+      }, [startedAt])
+
+      async function handleStart() {
+        const start = new Date()
+        const override = parseLooseTime(startTimeOverride)
+        if (override) {
+          const [h, m] = override.split(':').map(Number)
+          start.setHours(h, m, 0, 0)
+        }
+        await setActiveTimer({ task, notes, startedAt: start.toISOString() })
+        setStartedAt(start)
+        setElapsed(0)
+        setStartTimeOverride('')
+      }
+
+      async function handleStop() {
+        const start = startedAt
+        const end = new Date()
+        const hours = (end.getTime() - start.getTime()) / 1000 / 60 / 60
+        await saveEntry({
+          date: localDateStr(end), task, notes, start: hhmm(start), end: hhmm(end), hours,
+          client, project, firstName, lastName,
+        })
+        await clearActiveTimer()
+        setStartedAt(null)
+        setElapsed(0)
+        setNotes('')
+        reloadEntries()
+      }
+
+      async function handlePastSubmit(e) {
+        e.preventDefault()
+        const start = parseLooseTime(pastStart)
+        const end = parseLooseTime(pastEnd)
+        if (!start || !end) return
+        const [sh, sm] = start.split(':').map(Number)
+        const [eh, em] = end.split(':').map(Number)
+        const hours = (eh * 60 + em - (sh * 60 + sm)) / 60
+        if (hours <= 0) return
+        await saveEntry({
+          id: pastModal.id, date: pastModal.date, task: pastTask, notes: pastNotes, start, end, hours,
+          client: pastClient, project: pastProject, firstName: pastFirstName, lastName: pastLastName,
+        })
+        if (!pastModal.id) {
+          updateDefaults({ client: pastClient, project: pastProject, firstName: pastFirstName, lastName: pastLastName })
+        }
+        setPastModal(null)
+        reloadEntries()
+      }
+
+      const elapsedLabel = new Date(elapsed).toISOString().slice(11, 19)
+
+      return html`
+        <h1>Time tracking</h1>
+        ${error && html`<p style=${{ color: '#ef4444' }}>${error}</p>`}
+        <form onSubmit=${(e) => e.preventDefault()}>
+          <select
+            value=${client}
+            onChange=${(e) => updateDefaults({ ...defaults, client: e.target.value, project: (clients.find((c) => c.name === e.target.value)?.projects || [])[0] || '' })}
+            disabled=${!!startedAt}
+          >
+            ${clients.map((c) => html`<option key=${c.id} value=${c.name}>${c.name}</option>`)}
+          </select>
+          <select value=${task} onChange=${(e) => setTask(e.target.value)} disabled=${!!startedAt}>
+            ${TASKS.map((t) => html`<option key=${t} value=${t}>${t}</option>`)}
+          </select>
+          <input
+            placeholder="Notes"
+            value=${notes}
+            onInput=${(e) => setNotes(e.target.value)}
+            onBlur=${() => startedAt && setActiveTimer({ task, notes, startedAt: startedAt.toISOString() })}
+          />
+          ${startedAt
+            ? html`
+                <span class="timer">${elapsedLabel}</span>
+                <button type="button" onClick=${handleStop}>Stop timer</button>
+              `
+            : html`
+                <input
+                  placeholder="start time (optional)" style=${{ width: 150 }}
+                  value=${startTimeOverride}
+                  onInput=${(e) => setStartTimeOverride(e.target.value)}
+                />
+                <button type="button" onClick=${handleStart}>Start timer</button>
+              `}
+        </form>
+
+        <div class="action-stack">
+          <button type="button" onClick=${() => openPastModal(localDateStr(new Date()))}>+ Log past entry</button>
+          <button type="button" class="secondary" onClick=${() => setManageClientsOpen(true)}>Edit clients</button>
+        </div>
+
+        ${pastModal && html`
+          <div class="overlay" onClick=${(e) => e.target === e.currentTarget && setPastModal(null)}>
+            <div class="modal">
+              <h2>${pastModal.id ? 'Edit entry' : 'Log entry'}</h2>
+              <form onSubmit=${handlePastSubmit}>
+                <input
+                  type="date" value=${pastModal.date} required
+                  onInput=${(e) => setPastModal({ ...pastModal, date: e.target.value })}
+                />
+                <select
+                  value=${pastClient}
+                  onChange=${(e) => {
+                    setPastClient(e.target.value)
+                    setPastProject((clients.find((c) => c.name === e.target.value)?.projects || [])[0] || '')
+                  }}
+                >
+                  ${!clients.some((c) => c.name === pastClient) && html`<option value=${pastClient}>${pastClient}</option>`}
+                  ${clients.map((c) => html`<option key=${c.id} value=${c.name}>${c.name}</option>`)}
+                </select>
+                <select value=${pastProject} onChange=${(e) => setPastProject(e.target.value)}>
+                  ${!(clients.find((c) => c.name === pastClient)?.projects || []).includes(pastProject) && html`<option value=${pastProject}>${pastProject}</option>`}
+                  ${(clients.find((c) => c.name === pastClient)?.projects || []).map((p) => html`<option key=${p} value=${p}>${p}</option>`)}
+                </select>
+                <input placeholder="First name" value=${pastFirstName} onInput=${(e) => setPastFirstName(e.target.value)} />
+                <input placeholder="Last name" value=${pastLastName} onInput=${(e) => setPastLastName(e.target.value)} />
+                <select value=${pastTask} onChange=${(e) => setPastTask(e.target.value)}>
+                  ${TASKS.map((t) => html`<option key=${t} value=${t}>${t}</option>`)}
+                </select>
+                <input placeholder="Notes" value=${pastNotes} onInput=${(e) => setPastNotes(e.target.value)} />
+                <div class="times">
+                  <input
+                    placeholder="09:00" value=${pastStart} autofocus
+                    onInput=${(e) => setPastStart(e.target.value)}
+                    onBlur=${(e) => setPastStart(parseLooseTime(e.target.value) || e.target.value)}
+                  />
+                  <span>to</span>
+                  <input
+                    placeholder="17:00" value=${pastEnd}
+                    onInput=${(e) => setPastEnd(e.target.value)}
+                    onBlur=${(e) => setPastEnd(parseLooseTime(e.target.value) || e.target.value)}
+                  />
+                </div>
+                ${confirmDelete
+                  ? html`
+                      <p>Delete this entry? This can't be undone.</p>
+                      <div class="actions">
+                        <button type="button" class="secondary" onClick=${() => setConfirmDelete(false)}>No, keep it</button>
+                        <button type="button" onClick=${handleDeleteEntry}>Yes, delete it</button>
+                      </div>
+                    `
+                  : html`
+                      <div class="actions">
+                        ${pastModal.id && html`
+                          <button type="button" class="secondary" onClick=${() => setConfirmDelete(true)} style=${{ marginRight: 'auto' }}>Delete entry</button>
+                        `}
+                        <button type="button" class="secondary" onClick=${() => setPastModal(null)}>Cancel</button>
+                        <button type="submit">Save</button>
+                      </div>
+                    `}
+              </form>
+            </div>
+          </div>
+        `}
+
+        ${manageClientsOpen && html`
+          <div class="overlay" onClick=${(e) => e.target === e.currentTarget && setManageClientsOpen(false)}>
+            <div class="modal clients-modal">
+              <h2>Manage clients</h2>
+              ${clients.map((c) => html`
+                <div key=${c.id} class="client-block">
+                  <div class="client-row">
+                    ${renaming?.clientId === c.id && renaming.project == null
+                      ? html`
+                          <input value=${renameValue} autofocus onInput=${(e) => setRenameValue(e.target.value)} onBlur=${commitRename}
+                            onKeyDown=${(e) => e.key === 'Enter' && commitRename()} />
+                        `
+                      : html`<strong style=${{ flex: 1 }}>${c.name}</strong>`}
+                    <button type="button" class="icon-button small" title="Rename client" onClick=${() => startRename(c.id, null)}>✎</button>
+                    <button type="button" class="icon-button small" title="Delete client" onClick=${() => requestDelete(c, null)}>🗑</button>
+                  </div>
+                  ${(c.projects || []).map((p) => html`
+                    <div key=${p} class="project-row">
+                      ${renaming?.clientId === c.id && renaming.project === p
+                        ? html`
+                            <input value=${renameValue} autofocus onInput=${(e) => setRenameValue(e.target.value)} onBlur=${commitRename}
+                              onKeyDown=${(e) => e.key === 'Enter' && commitRename()} />
+                          `
+                        : html`<span style=${{ flex: 1 }}>${p}</span>`}
+                      <button type="button" class="icon-button small" title="Rename project" onClick=${() => startRename(c.id, p)}>✎</button>
+                      <button type="button" class="icon-button small" title="Delete project" onClick=${() => requestDelete(c, p)}>🗑</button>
+                    </div>
+                  `)}
+                  <form class="add-row project-row" onSubmit=${(e) => handleAddProject(e, c)}>
+                    <input
+                      placeholder="+ Add project" value=${newProjectByClient[c.id] || ''}
+                      onInput=${(e) => setNewProjectByClient((prev) => ({ ...prev, [c.id]: e.target.value }))}
+                    />
+                    <button type="submit" class="icon-button small">Add</button>
+                  </form>
+                </div>
+              `)}
+              <form class="add-row" onSubmit=${handleAddClient}>
+                <input placeholder="+ Add client" value=${newClientName} onInput=${(e) => setNewClientName(e.target.value)} />
+                <button type="submit">Add</button>
+              </form>
+              ${confirmDeleteTarget && html`
+                <div class="overlay" style=${{ zIndex: 30 }}>
+                  <div class="modal" style=${{ width: 280 }}>
+                    <h2>Delete ${confirmDeleteTarget.project ? 'project' : 'client'}?</h2>
+                    <p>${(() => {
+                      const target = confirmDeleteTarget.project
+                        ? `"${confirmDeleteTarget.project}" under ${confirmDeleteTarget.clientDoc.name}`
+                        : `"${confirmDeleteTarget.clientDoc.name}" and all its projects`
+                      const count = deleteEntryCount === null ? '…' : `${deleteEntryCount} logged ${deleteEntryCount === 1 ? 'entry' : 'entries'}`
+                      return `${target} will be removed, along with ${count}. This can't be undone.`
+                    })()}</p>
+                    <div class="actions">
+                      <button type="button" class="secondary" onClick=${() => { setConfirmDeleteTarget(null); setDeleteEntryCount(null) }}>No, keep it</button>
+                      <button type="button" onClick=${confirmDeleteNow}>Yes, delete it</button>
+                    </div>
+                  </div>
+                </div>
+              `}
+              <div class="actions">
+                <button type="button" class="secondary" onClick=${() => setManageClientsOpen(false)}>Close</button>
+              </div>
+            </div>
+          </div>
+        `}
+
+        ${(() => {
+          const options = []
+          const seenClients = new Set()
+          const seenProjects = new Set()
+          for (const e of entries) {
+            if (!seenClients.has(e.client)) { seenClients.add(e.client); options.push({ value: `client::${e.client}`, label: `${e.client} (all projects)` }) }
+            const projectKey = `${e.client}|${e.project}`
+            if (!seenProjects.has(projectKey)) { seenProjects.add(projectKey); options.push({ value: `project::${e.client}|${e.project}`, label: `${e.client} / ${e.project}` }) }
+          }
+          return html`
+            <div class="filter-bar">
+              <select value=${filter} onChange=${(e) => { setFilter(e.target.value); setSelectedIds(new Set()) }}>
+                <option value="all">All clients / projects</option>
+                ${options.map((o) => html`<option key=${o.value} value=${o.value}>${o.label}</option>`)}
+              </select>
+              <div class="spacer"></div>
+              ${selectedIds.size > 0 && (
+                confirmBulkDelete
+                  ? html`
+                      <span>Delete ${selectedIds.size} ${selectedIds.size === 1 ? 'entry' : 'entries'}? This can't be undone.</span>
+                      <button type="button" class="secondary" onClick=${() => setConfirmBulkDelete(false)}>No, keep them</button>
+                      <button type="button" class="danger" onClick=${handleBulkDelete}>Yes, delete</button>
+                    `
+                  : html`
+                      <button type="button" class="secondary" onClick=${() => setSelectedIds(new Set())}>Unselect all</button>
+                      <button type="button" class="danger" onClick=${() => setConfirmBulkDelete(true)}>
+                        Delete ${selectedIds.size} selected
+                      </button>
+                    `
+              )}
+            </div>
+          `
+        })()}
+
+        <table>
+          <thead>
+            <tr><th class="checkbox-col"></th><th>Date</th><th>Client</th><th>Task</th><th>Notes</th><th>Start</th><th>End</th><th>Hours</th></tr>
+          </thead>
+          <tbody>
+            ${(() => {
+              const filteredEntries = filter === 'all' ? entries : entries.filter((e) => {
+                if (filter.startsWith('client::')) return e.client === filter.slice('client::'.length)
+                const [c, p] = filter.slice('project::'.length).split('|')
+                return e.client === c && e.project === p
+              })
+              const rows = buildRows(filteredEntries).reverse()
+              const orderedIds = rows.filter((row) => !row.empty).map((row) => row.id)
+              return rows.map((row, i) => {
+                const weekKey = isoWeekKey(row.date)
+                const showWeekHeader = i === 0 || isoWeekKey(rows[i - 1].date) !== weekKey
+                const weekTotal = showWeekHeader
+                  ? filteredEntries.filter((e) => isoWeekKey(e.date) === weekKey).reduce((sum, e) => sum + e.hours, 0)
+                  : 0
+                const weekday = new Date(row.date + 'T00:00:00').getDay()
+                const isWeekend = weekday === 0 || weekday === 6
+                return html`
+                  ${showWeekHeader && html`
+                    <tr class="week-header" key=${weekKey}>
+                      <td colspan="8">Week ${weekKey.split('-W')[1]} · ${weekTotal.toFixed(2)}h</td>
+                    </tr>
+                  `}
+                  <tr
+                    key=${row.id || row.date}
+                    class=${row.empty ? 'empty' : isWeekend ? 'weekend' : ''}
+                    onClick=${row.empty ? () => openPastModal(row.date) : () => openEditModal(row)}
+                  >
+                    <td class="checkbox-col" onClick=${(e) => e.stopPropagation()}>
+                      ${!row.empty && html`
+                        <input
+                          type="checkbox"
+                          checked=${selectedIds.has(row.id)}
+                          onClick=${(e) => { e.preventDefault(); toggleSelected(row.id, e, orderedIds) }}
+                        />
+                      `}
+                    </td>
+                    <td><span class="weekday">${WEEKDAYS[weekday]}</span> ${row.date}</td>
+                    <td>${row.empty ? '' : row.client}</td>
+                    <td>${row.empty ? '+ add entry' : row.task}</td>
+                    <td>${row.empty ? '' : row.notes}</td>
+                    <td>${row.empty ? '' : row.startedAt}</td>
+                    <td>${row.empty ? '' : row.endedAt}</td>
+                    <td>${row.empty ? '' : row.hours}</td>
+                  </tr>
+                `
+              })
+            })()}
+          </tbody>
+        </table>
+      `
+    }
+
+    createRoot(document.getElementById('root')).render(html`<${App} />`)
+  </script>
+</body>
+</html>
